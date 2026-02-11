@@ -1,0 +1,19 @@
+services:
+  stt-web:
+    build: .
+    ports:
+      - "7860:7860"
+    volumes:
+      - /root/stt:/app/stt:ro
+      - /root/.cache/huggingface:/root/.cache/huggingface:ro
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: unless-stopped
