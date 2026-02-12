@@ -5,8 +5,16 @@ services:
       - "7860:7860"
     volumes:
       - /root/stt:/app/stt:ro
+      - /root/models:/models:ro
       - /root/.cache/huggingface:/root/.cache/huggingface:ro
     environment:
+      # Switch models by changing STT_MODEL (local path or HF ID).
+      # Set STT_MODEL_HF to the HuggingFace ID for display/link in the UI.
+      #   /models/whisper-small-uz        → BlueRaccoon/whisper-small-uz
+      #   /models/whisper-uzbek-medium    → aisha-org/Whisper-Uzbek
+      #   RubaiLab/kotib_call_base_stt_15 → (auto-detected, no STT_MODEL_HF needed)
+      - STT_MODEL=/models/kotib_call_base_stt_15
+      - STT_MODEL_HF=RubaiLab/kotib_call_base_stt_15
       - HF_HOME=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
     deploy:

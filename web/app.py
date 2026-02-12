@@ -7,8 +7,11 @@ sys.path.insert(0, "/app/stt")
 from stt_service_new import UzbekSTTService
 import gradio as gr
 
-print("Loading Uzbek STT model...")
-stt = UzbekSTTService(offline_mode=True)
+import os
+
+MODEL = os.environ.get("STT_MODEL", "RubaiLab/kotib_call_base_stt_15")
+print(f"Loading Uzbek STT model: {MODEL}")
+stt = UzbekSTTService(model_name=MODEL, offline_mode=True)
 print("Model ready!")
 
 
@@ -165,6 +168,33 @@ custom_css = """
     font-size: 0.88em;
     opacity: 0.7;
     margin-top: 4px;
+}
+
+/* ---- Model badge ---- */
+#model-badge-wrap {
+    text-align: right;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+}
+#model-badge {
+    display: inline-block;
+    font-family: monospace;
+    font-size: 0.82em;
+    font-weight: 600;
+    color: #6b7280;
+    background: rgba(107,114,128,0.10);
+    border: 1px solid rgba(107,114,128,0.20);
+    padding: 4px 10px;
+    border-radius: 6px;
+    white-space: nowrap;
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+a#model-badge:hover {
+    color: #3b82f6;
+    border-color: rgba(59,130,246,0.35);
+    background: rgba(59,130,246,0.08);
 }
 
 /* ---- Fix audio player overflow in narrow column ---- */
@@ -386,9 +416,29 @@ custom_js = """
 })();
 """
 
+# --------------- Model display name ---------------
+# STT_MODEL_HF = HuggingFace model ID for display/link (e.g. "aisha-org/Whisper-Uzbek")
+# Falls back to STT_MODEL if it looks like a HF ID (org/name), otherwise shows raw path.
+_model_hf = os.environ.get("STT_MODEL_HF", "")
+if not _model_hf:
+    # Auto-detect: if MODEL looks like "org/name" (no leading /), treat as HF ID
+    if "/" in MODEL and not MODEL.startswith("/"):
+        _model_hf = MODEL.rstrip("/")
+
+if _model_hf:
+    _hf_url = f"https://huggingface.co/{_model_hf}"
+    _badge_html = f'<a id="model-badge" href="{_hf_url}" target="_blank">{_model_hf}</a>'
+else:
+    _badge_html = f'<span id="model-badge">{MODEL}</span>'
+
 # --------------- Layout ---------------
 with gr.Blocks(title="Uzbek Speech-to-Text", css=custom_css, js=custom_js) as demo:
-    gr.Markdown("# Uzbek Speech-to-Text")
+    with gr.Row():
+        gr.Markdown("# Uzbek Speech-to-Text")
+        gr.Markdown(
+            _badge_html,
+            elem_id="model-badge-wrap",
+        )
     gr.Markdown(
         "Audio faylni yuklang yoki mikrofon orqali yozing — "
         "transkripsiya avtomatik boshlanadi. "
