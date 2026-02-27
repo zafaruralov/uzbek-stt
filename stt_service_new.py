@@ -18,7 +18,7 @@ class UzbekSTTService:
         Uzbek STT modelni yuklash
 
         Args:
-            model_name: Model nomi yoki local path
+            model_name: Model nomi yoki local path (.pt fayl yoki HuggingFace ID)
             offline_mode: True bo'lsa, faqat cache'dan yuklaydi (internet'siz)
         """
         logger.info("Model yuklanmoqda...")
@@ -31,39 +31,50 @@ class UzbekSTTService:
         self.chunk_length_seconds = 30  # Maksimal 30 soniya
         self.sample_rate = 16000
 
-        try:
-            logger.info("Processor yuklanmoqda...")
-            self.processor = WhisperProcessor.from_pretrained(
-                model_name,
-                token=True,
-                local_files_only=offline_mode
-            )
+        # .pt fayl bo'lsa OpenAI whisper kutubxonasidan foydalanish
+        self._use_openai_whisper = model_name.endswith('.pt')
 
-            logger.info("Model yuklanmoqda...")
-            self.model = WhisperForConditionalGeneration.from_pretrained(
-                model_name,
-                token=True,
-                local_files_only=offline_mode
-            )
-
-            self.model.to(self.device)
-            self.model.eval()
-
+        if self._use_openai_whisper:
+            import whisper as openai_whisper
+            self._openai_whisper = openai_whisper
+            logger.info(f"OpenAI Whisper .pt model yuklanmoqda: {model_name}")
+            self.model = openai_whisper.load_model(model_name, device=self.device)
+            self.processor = None
             logger.info("Model muvaffaqiyatli yuklandi!")
+        else:
+            try:
+                logger.info("Processor yuklanmoqda...")
+                self.processor = WhisperProcessor.from_pretrained(
+                    model_name,
+                    token=True,
+                    local_files_only=offline_mode
+                )
 
-        except OSError as e:
-            if offline_mode or "Temporary failure in name resolution" in str(e):
-                logger.error("\n" + "=" * 60)
-                logger.error("❌ MODEL CACHE'DA TOPILMADI!")
-                logger.error("=" * 60)
-                logger.error("Model hali to'liq yuklanmagan.")
-                logger.error("\n💡 Yechim:")
-                logger.error("   1. Internet'ga ulaning")
-                logger.error("   2. Quyidagi buyruqni bajaring:")
-                logger.error("      python download_model.py")
-                logger.error("   3. Model yuklangandan keyin offline ishlaydi")
-                logger.error("=" * 60)
-            raise
+                logger.info("Model yuklanmoqda...")
+                self.model = WhisperForConditionalGeneration.from_pretrained(
+                    model_name,
+                    token=True,
+                    local_files_only=offline_mode
+                )
+
+                self.model.to(self.device)
+                self.model.eval()
+
+                logger.info("Model muvaffaqiyatli yuklandi!")
+
+            except OSError as e:
+                if offline_mode or "Temporary failure in name resolution" in str(e):
+                    logger.error("\n" + "=" * 60)
+                    logger.error("MODEL CACHE'DA TOPILMADI!")
+                    logger.error("=" * 60)
+                    logger.error("Model hali to'liq yuklanmagan.")
+                    logger.error("\n Yechim:")
+                    logger.error("   1. Internet'ga ulaning")
+                    logger.error("   2. Quyidagi buyruqni bajaring:")
+                    logger.error("      python download_model.py")
+                    logger.error("   3. Model yuklangandan keyin offline ishlaydi")
+                    logger.error("=" * 60)
+                raise
 
     def load_audio(self, audio_path):
         """Audio faylni yuklash va tayyorlash (PyAV orqali — to'liq MP3 qo'llab-quvvatlash)"""
@@ -188,8 +199,42 @@ class UzbekSTTService:
 
         return text, segments
 
+    def _transcribe_openai_whisper(self, audio_path, with_timestamps=True):
+        """OpenAI Whisper .pt model bilan transcribe qilish"""
+        try:
+            logger.info(f"OpenAI Whisper bilan transcribe: {audio_path}")
+            audio = self._openai_whisper.load_audio(audio_path)
+            duration = len(audio) / self.sample_rate
+
+            result = self.model.transcribe(audio, language="uz")
+
+            segments = []
+            if with_timestamps:
+                for s in result.get("segments", []):
+                    segments.append({
+                        "start": round(s["start"], 2),
+                        "end": round(s["end"], 2),
+                        "text": s["text"].strip(),
+                    })
+
+            return {
+                "success": True,
+                "text": result["text"].strip(),
+                "segments": segments,
+                "language": result.get("language", "uz"),
+                "duration": duration,
+                "chunks": 1,
+            }
+        except Exception as e:
+            logger.error(f"Xatolik (OpenAI Whisper): {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e), "segments": []}
+
     def transcribe_with_timestamps(self, audio_path):
         """Audio faylni timestamp'lar bilan matunga o'girish"""
+        if self._use_openai_whisper:
+            return self._transcribe_openai_whisper(audio_path, with_timestamps=True)
         try:
             logger.info(f"Audio yuklanyapti (timestamps): {audio_path}")
 
@@ -272,6 +317,8 @@ class UzbekSTTService:
 
     def transcribe(self, audio_path):
         """Audio faylni matunga o'girish (uzun audiolar uchun chunking)"""
+        if self._use_openai_whisper:
+            return self._transcribe_openai_whisper(audio_path, with_timestamps=False)
         try:
             logger.info(f"Audio yuklanyapti: {audio_path}")
 

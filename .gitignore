@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info/
 venv/
 
-# Audio test files
+# Audio files
 *.mp3
 *.wav
 *.flac
@@ -18,3 +18,35 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Large training data and models
+raw_audio/
+nemo_data/
+nemo_output/
+nemo_output_split/
+nemo_experiment/
+kotib_output/
+
+# v2 pipeline data (large)
+v2_pipeline/data/
+v2_pipeline/models/
+v2_pipeline/audio/
+v2_pipeline/outputs/
+v2_pipeline/logs/
+v2_pipeline/manifests/
+v2_pipeline/reports/
+
+# Logs and artifacts
+*.log
+*.nemo
+manifest_combined.jsonl
+
+# Gradio cache
+.gradio/
+v2_pipeline/.gradio/
+
+# PDF files (training books)
+v2_pipeline/incoming/
+
+# Environment
+.claude/

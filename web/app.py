@@ -10,6 +10,7 @@ import gradio as gr
 import os
 
 MODEL = os.environ.get("STT_MODEL", "RubaiLab/kotib_call_base_stt_15")
+LIVE_STT_URL = os.environ.get("LIVE_STT_URL", "")
 print(f"Loading Uzbek STT model: {MODEL}")
 stt = UzbekSTTService(model_name=MODEL, offline_mode=True)
 print("Model ready!")
@@ -195,6 +196,22 @@ a#model-badge:hover {
     color: #3b82f6;
     border-color: rgba(59,130,246,0.35);
     background: rgba(59,130,246,0.08);
+}
+
+/* ---- Live link ---- */
+#live-link a {
+    display: inline-block;
+    font-size: 0.85em;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    padding: 5px 12px;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: opacity 0.15s;
+}
+#live-link a:hover {
+    opacity: 0.85;
 }
 
 /* ---- Fix audio player overflow in narrow column ---- */
@@ -432,9 +449,15 @@ else:
     _badge_html = f'<span id="model-badge">{MODEL}</span>'
 
 # --------------- Layout ---------------
+_live_link_html = ""
+if LIVE_STT_URL:
+    _live_link_html = f'<a href="{LIVE_STT_URL}" target="_blank">Live Transcription</a>'
+
 with gr.Blocks(title="Uzbek Speech-to-Text", css=custom_css, js=custom_js) as demo:
     with gr.Row():
         gr.Markdown("# Uzbek Speech-to-Text")
+        if _live_link_html:
+            gr.HTML(_live_link_html, elem_id="live-link")
         gr.Markdown(
             _badge_html,
             elem_id="model-badge-wrap",

@@ -15,6 +15,7 @@ services:
       #   RubaiLab/kotib_call_base_stt_15 → (auto-detected, no STT_MODEL_HF needed)
       - STT_MODEL=/models/kotib_call_base_stt_15
       - STT_MODEL_HF=RubaiLab/kotib_call_base_stt_15
+      - LIVE_STT_URL=http://172.18.35.124:8000
       - HF_HOME=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
     deploy:
@@ -22,6 +23,42 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"]
+              device_ids: ["1"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  stt-live:
+    build:
+      context: .
+      dockerfile: Dockerfile.live
+    ports:
+      - "8000:8000"
+    volumes:
+      - /root/models:/models:ro
+    command:
+      - --model_dir
+      - /models/kotib_call_base_stt_15_ct2
+      - --lan
+      - uz
+      - --backend
+      - faster-whisper
+      - --backend-policy
+      - localagreement
+      - --no-vad
+      - --confidence-validation
+      - --min-chunk-size
+      - "0.5"
+      - --buffer_trimming
+      - segment
+      - --buffer_trimming_sec
+      - "10"
+      - -l
+      - DEBUG
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
               capabilities: [gpu]
     restart: unless-stopped
