@@ -16,18 +16,69 @@ Key concepts:
 
 import argparse
 import logging
+import os
+import random
 import types
 from pathlib import Path
 
+import numpy as np
 import torch
 import lightning.pytorch as pl  # must use 'lightning' not 'pytorch_lightning' to match NeMo's base class
 from omegaconf import OmegaConf, open_dict
+from scipy.signal import butter, sosfilt
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
 from nemo.collections.asr.losses.rnnt import RNNTLoss
+from nemo.collections.asr.parts.preprocessing.perturb import Perturbation, register_perturbation
 from nemo.core.classes.mixins import AccessMixin
 from nemo.utils.exp_manager import exp_manager
+
+
+class TelephonePerturbation(Perturbation):
+    """Simulate telephone codec: bandpass 300-3400Hz + 8kHz downsample/upsample.
+
+    This teaches the model to handle phone-quality audio (102 emergency calls, etc.)
+    by simulating the frequency and resolution loss of telephone transmission.
+    """
+
+    def __init__(self, prob=0.5, lowcut=300, highcut=3400, codec_sr=8000, filter_order=5):
+        self._prob = prob
+        self.lowcut = lowcut
+        self.highcut = highcut
+        self.codec_sr = codec_sr
+        self.filter_order = filter_order
+
+    def perturb(self, data):
+        if random.random() > self._prob:
+            return
+        sr = data.sample_rate
+        samples = data.samples.copy()
+
+        # Bandpass filter 300-3400 Hz (telephone frequency range)
+        nyq = sr / 2
+        low = self.lowcut / nyq
+        high = min(self.highcut / nyq, 0.99)  # ensure < Nyquist
+        sos = butter(self.filter_order, [low, high], btype="band", output="sos")
+        samples = sosfilt(sos, samples).astype(np.float32)
+
+        # Downsample to 8kHz then back to original SR (simulates codec resolution loss)
+        down_len = int(len(samples) * self.codec_sr / sr)
+        if down_len > 0:
+            indices = np.linspace(0, len(samples) - 1, down_len).astype(int)
+            downsampled = samples[indices]
+            up_len = len(data.samples)
+            indices = np.linspace(0, len(downsampled) - 1, up_len).astype(int)
+            samples = downsampled[indices]
+
+        data._samples = samples
+
+    def max_augmentation_length(self, length):
+        return length
+
+
+# Register so NeMo's augmentor pipeline can instantiate it by name
+register_perturbation("telephone", TelephonePerturbation)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -52,20 +103,46 @@ DEFAULT_TEST_MANIFEST = str(DEFAULT_DATA_DIR / "manifest_test.jsonl")
 
 def enable_rnnt_pytorch_loss(model):
     """Switch RNNT loss to pure PyTorch implementation (slow, but avoids numba CUDA kernels)."""
-    with open_dict(model.cfg):
-        if "loss" not in model.cfg or model.cfg.loss is None:
-            model.cfg.loss = OmegaConf.create({})
-        model.cfg.loss.loss_name = "pytorch"
-        model.cfg.loss.pytorch_kwargs = OmegaConf.create({})
-
-    # Rebuild loss module so runtime change takes effect.
-    model.loss = RNNTLoss(
+    pytorch_loss = RNNTLoss(
         num_classes=model.joint.num_classes_with_blank - 1,
         reduction=model.cfg.get("rnnt_reduction", "mean_batch"),
         loss_name="pytorch",
         loss_kwargs={},
     )
-    log.info("RNNT loss switched to `pytorch` (debug-safe mode; much slower).")
+
+    with open_dict(model.cfg):
+        if "loss" not in model.cfg or model.cfg.loss is None:
+            model.cfg.loss = OmegaConf.create({})
+        model.cfg.loss.loss_name = "pytorch"
+        model.cfg.loss.pytorch_kwargs = OmegaConf.create({})
+        # In smoke mode, disable fused path so training_step uses model.loss directly.
+        if "joint" in model.cfg and model.cfg.joint is not None and "fuse_loss_wer" in model.cfg.joint:
+            model.cfg.joint.fuse_loss_wer = False
+
+    # Replace loss on model AND on joint (fused loss-WER path uses joint.loss)
+    model.loss = pytorch_loss
+    if hasattr(model.joint, "loss"):
+        model.joint.loss = pytorch_loss
+    if hasattr(model.joint, "_fuse_loss_wer"):
+        model.joint._fuse_loss_wer = False
+    log.info("RNNT loss switched to `pytorch` on model.loss AND model.joint.loss.")
+    log.info("RNNT fused loss-WER disabled for smoke mode: joint.fuse_loss_wer=%s",
+             getattr(model.joint, "fuse_loss_wer", "n/a"))
+
+
+def disable_cuda_graphs_for_rnnt(model):
+    """Disable CUDA-graph paths that can be unstable in some RNNT setups."""
+    # NeMo respects this env var in graph-related code paths.
+    os.environ["NEMO_DISABLE_CUDA_GRAPHS"] = "1"
+    with open_dict(model.cfg):
+        if "decoding" in model.cfg and model.cfg.decoding is not None:
+            if "greedy" in model.cfg.decoding and model.cfg.decoding.greedy is not None:
+                if "use_cuda_graph_decoder" in model.cfg.decoding.greedy:
+                    model.cfg.decoding.greedy.use_cuda_graph_decoder = False
+    # Runtime guards for already-built modules (best effort).
+    if hasattr(model, "decoding") and hasattr(model.decoding, "use_cuda_graph_decoder"):
+        model.decoding.use_cuda_graph_decoder = False
+    log.info("CUDA graphs disabled for RNNT (`NEMO_DISABLE_CUDA_GRAPHS=1`).")
 
 
 def enable_ctc_only_training(model):
@@ -296,6 +373,48 @@ def main():
         default=4,
         help="Gradient accumulation steps.",
     )
+    parser.add_argument(
+        "--speed-perturb",
+        action="store_true",
+        default=False,
+        help="Enable speed perturbation (0.9x, 1.0x, 1.1x) for data augmentation.",
+    )
+    parser.add_argument(
+        "--noise-manifest",
+        type=str,
+        default=None,
+        help="Path to MUSAN noise manifest JSONL for noise augmentation.",
+    )
+    parser.add_argument(
+        "--noise-prob",
+        type=float,
+        default=0.5,
+        help="Probability of adding noise to each sample (default: 0.5).",
+    )
+    parser.add_argument(
+        "--min-snr-db",
+        type=float,
+        default=5,
+        help="Minimum SNR in dB for noise augmentation (default: 5).",
+    )
+    parser.add_argument(
+        "--max-snr-db",
+        type=float,
+        default=20,
+        help="Maximum SNR in dB for noise augmentation (default: 20).",
+    )
+    parser.add_argument(
+        "--telephone-aug",
+        action="store_true",
+        default=False,
+        help="Enable telephone codec simulation (bandpass 300-3400Hz + 8kHz downsample).",
+    )
+    parser.add_argument(
+        "--telephone-prob",
+        type=float,
+        default=0.3,
+        help="Probability of applying telephone simulation per sample (default: 0.3).",
+    )
     args = parser.parse_args()
     model_path = Path(args.model_path)
     train_manifest = Path(args.train_manifest)
@@ -324,6 +443,11 @@ def main():
     elif args.train_mode == "ctc-only":
         enable_ctc_only_training(model)
 
+    # Prevent CUDA graphs entirely — avoids segfault in libcuda.so driver 580.x
+    # when NeMo toggles graphs on/off during train/val transitions.
+    if args.train_mode in ("rnnt", "rnnt-smoke"):
+        disable_cuda_graphs_for_rnnt(model)
+
     # ──────────────────────────────────────────
     # STEP 2: Update the model's data configuration
     # ──────────────────────────────────────────
@@ -339,6 +463,48 @@ def main():
         model.cfg.train_ds.pin_memory = True  # faster CPU→GPU transfer
         model.cfg.train_ds.max_duration = 30  # match our segment max length
         model.cfg.train_ds.min_duration = 2.0  # skip very short segments
+
+        # --- Speed perturbation (data augmentation) ---
+        if args.speed_perturb:
+            model.cfg.train_ds.speed_perturb = True
+            log.info("Speed perturbation ENABLED (0.9x, 1.0x, 1.1x) — 3x effective data variety")
+
+        # --- Stronger SpecAugment when any augmentation is enabled ---
+        any_aug = args.speed_perturb or args.noise_manifest or args.telephone_aug
+        if any_aug and hasattr(model.cfg, "spec_augment"):
+            model.cfg.spec_augment.freq_masks = 3   # was 2
+            model.cfg.spec_augment.time_masks = 12   # was 10
+            log.info("SpecAugment strengthened: freq_masks=3, time_masks=12")
+
+        # --- Noise augmentation (MUSAN) ---
+        augmentor_cfg = {}
+        if args.noise_manifest:
+            noise_path = Path(args.noise_manifest)
+            if not noise_path.exists():
+                raise FileNotFoundError(f"Noise manifest not found: {noise_path}")
+            augmentor_cfg["noise"] = {
+                "prob": args.noise_prob,
+                "manifest_path": str(noise_path),
+                "min_snr_db": args.min_snr_db,
+                "max_snr_db": args.max_snr_db,
+            }
+            log.info(
+                "Noise augmentation ENABLED: manifest=%s, prob=%.1f, SNR=[%.0f,%.0f]dB",
+                noise_path.name, args.noise_prob, args.min_snr_db, args.max_snr_db,
+            )
+
+        # --- Telephone codec simulation ---
+        if args.telephone_aug:
+            augmentor_cfg["telephone"] = {
+                "prob": args.telephone_prob,
+            }
+            log.info(
+                "Telephone simulation ENABLED: prob=%.1f (bandpass 300-3400Hz + 8kHz codec)",
+                args.telephone_prob,
+            )
+
+        if augmentor_cfg:
+            model.cfg.train_ds.augmentor = OmegaConf.create(augmentor_cfg)
 
         # --- Validation data ---
         model.cfg.validation_ds.manifest_filepath = str(val_manifest)
@@ -356,6 +522,9 @@ def main():
     model.setup_training_data(model.cfg.train_ds)
     model.setup_validation_data(model.cfg.validation_ds)
     log.info("Data configured: train=%s, val=%s, test=%s", train_manifest, val_manifest, test_manifest)
+    log.info("Speed perturbation: %s", "ON" if args.speed_perturb else "OFF")
+    log.info("Noise augmentation: %s", "ON" if args.noise_manifest else "OFF")
+    log.info("Telephone simulation: %s", "ON" if args.telephone_aug else "OFF")
 
     # ──────────────────────────────────────────
     # STEP 3: Configure the optimizer & scheduler
